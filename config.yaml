@@ -1,0 +1,21 @@
+upload:
+  method: rsync
+  host: 192.168.1.203
+  user: picar
+  port: 22
+  dest_path: /home/picar/upload
+  ssh_key: /etc/camera_service/id_rsa
+camera:
+  hub_location: 1-1
+  port_number: 1
+  mount_base: /mnt/cam
+paths:
+  local_staging: /var/lib/camera_service/staging
+  log_path: /var/log/camera_service.log
+thresholds:
+  disconnect_percent: 50
+  shutdown_percent: 25
+poll:
+  interval_seconds: 30
+  mount_timeout_seconds: 20
+  upload_retries: 3

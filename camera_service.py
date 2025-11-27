@@ -149,16 +149,88 @@ def main():
                     logging.info("Host %s reachable=%s", host, reachable)
                     if reachable:
                         logging.info("Host reachable and battery sufficient — performing upload flow (dry_run=%s)", args.dry_run)
-                        # Enable data
+                        # Enable data (allows camera to enumerate)
                         maybe_run([start_data], dry_run=args.dry_run)
-                        # Wait a short time for device to enumerate
                         logging.info("Waiting for device enumeration (sleep 3s)")
                         time.sleep(3)
-                        # Device detection, mount and copy would go here
-                        logging.info("(Prototype) Would detect device, mount it, copy to staging, then disable data")
-                        maybe_run([stop_all], dry_run=args.dry_run)
-                        # Call uploader here
-                        logging.info("(Prototype) Would run uploader to %s", host)
+
+                        # Attempt to detect camera block device
+                        try:
+                            import device_detector
+                            import mount_helper
+                            import uploader
+                        except Exception as e:
+                            logging.exception('Required modules missing: %s', e)
+                            maybe_run([stop_all], dry_run=args.dry_run)
+                            continue
+
+                        dev = device_detector.detect_camera_block_device(cfg, timeout=cfg.get('poll', {}).get('mount_timeout_seconds', 20))
+                        if not dev:
+                            logging.warning('No camera block device detected; will disable data and continue')
+                            maybe_run([stop_all], dry_run=args.dry_run)
+                            continue
+
+                        staging = cfg.get('paths', {}).get('local_staging', '/var/lib/camera_service/staging')
+                        ensure_dir_cmd = ['mkdir', '-p', staging]
+                        maybe_run(ensure_dir_cmd, dry_run=args.dry_run)
+
+                        # Mount, measure size, enforce 90% storage constraint, copy, then unmount
+                        if args.dry_run:
+                            logging.info('DRY-RUN: would mount %s, compute sizes, copy to %s, then upload', dev, staging)
+                            maybe_run([stop_all], dry_run=True)
+                            logging.info('DRY-RUN: would run uploader to %s', host)
+                        else:
+                            try:
+                                with mount_helper.MountedDevice(dev, cfg.get('camera', {}).get('mount_base', '/mnt/cam'), readonly=True) as mount_path:
+                                    logging.info('Mounted camera at %s', mount_path)
+                                    # compute size of camera contents (bytes)
+                                    try:
+                                        du = subprocess.run(['du', '-sb', mount_path], capture_output=True, text=True, check=True)
+                                        size_bytes = int(du.stdout.split()[0])
+                                    except Exception:
+                                        logging.exception('Failed to compute size of camera contents; aborting copy')
+                                        size_bytes = None
+
+                                    # check available space on staging filesystem
+                                    staging_path = staging
+                                    os.makedirs(staging_path, exist_ok=True)
+                                    import shutil
+                                    total, used, free = shutil.disk_usage(staging_path)
+                                    max_allowed = int(total * 0.9)
+                                    logging.info('Staging fs total=%d used=%d free=%d max_allowed=%d', total, used, free, max_allowed)
+
+                                    if size_bytes is None:
+                                        logging.warning('Unknown camera size; skipping copy')
+                                    else:
+                                        projected_used = used + size_bytes
+                                        if projected_used > max_allowed:
+                                            logging.error('Not enough staging space: required=%d would_be_used=%d limit=%d; skipping copy', size_bytes, projected_used, max_allowed)
+                                        else:
+                                            logging.info('Enough space available; copying camera contents (%d bytes) to %s', size_bytes, staging_path)
+                                            mount_helper.copy_to_staging(mount_path, staging_path, use_rsync=True)
+                                            logging.info('Copy complete; disabling camera data/power to conserve battery')
+                            except Exception:
+                                logging.exception('Error during mount/copy flow')
+
+                            # disable data/power to conserve battery (or switch to recording mode as desired)
+                            maybe_run([stop_all], dry_run=False)
+
+                            # upload staged files
+                            ok = uploader.upload_dir(staging, cfg.get('upload', {}), dry_run=False, retries=cfg.get('poll', {}).get('upload_retries', 3))
+                            if ok:
+                                logging.info('Upload succeeded; removing staged files')
+                                try:
+                                    # remove staged contents
+                                    for entry in os.listdir(staging):
+                                        path = os.path.join(staging, entry)
+                                        if os.path.isdir(path):
+                                            shutil.rmtree(path)
+                                        else:
+                                            os.remove(path)
+                                except Exception:
+                                    logging.exception('Failed to clean up staging after upload')
+                            else:
+                                logging.error('Upload failed; leaving staged files for retry')
                     else:
                         logging.info("Network not available — ensure camera remains in recording mode")
                         maybe_run([start_rec], dry_run=args.dry_run)

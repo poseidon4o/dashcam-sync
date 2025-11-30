@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.so
+
+# Temp staging used during tests
+tmp-staging/
+
+# Backup and log files
+*.log
+*.bak
+
+# Editor and OS files
+.DS_Store
+.*.swp
+
+# Keys and secrets
+/etc/camera_service/
+id_rsa
+
+# Ignore virtualenvs and common env dirs
+venv/
+env/
+
+# Ignore systemd unit installs and runtime state
+/var/lib/camera_service/

@@ -9,6 +9,18 @@ camera:
   hub_location: 1-1
   port_number: 1
   mount_base: /mnt/cam
+  # subdirectory(s) on the camera to copy; relative to the mount base. Example: ['Normal/Front']
+  copy_subdirs:
+    - Normal/Front
+  # Limits for transfer selection (null means no limit)
+  # Maximum number of files to copy from the camera per connect event
+  transfer_max_files: null
+  # Maximum total bytes to copy from the camera per connect event
+  # Use integer bytes (e.g. 1073741824 for 1GiB) or null for no limit
+  transfer_max_bytes: null
+  # Selection strategy for which files to include when limiting
+  # one of: "newest", "oldest", "largest" (default: "newest")
+  transfer_select_strategy: newest
 paths:
   local_staging: /var/lib/camera_service/staging
   log_path: /var/log/camera_service.log

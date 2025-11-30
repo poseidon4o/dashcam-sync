@@ -22,6 +22,53 @@ import socket
 import subprocess
 import sys
 import time
+import shutil
+
+STOP = False
+
+
+def handle_sigterm(signum, frame):
+    global STOP
+    logging.info("Received signal %s, stopping", signum)
+    STOP = True
+
+
+signal.signal(signal.SIGINT, handle_sigterm)
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+
+DEFAULT_CONFIG = {
+    "upload": {"method": "rsync", "host": "192.168.1.203", "port": 22},
+    "camera": {"hub_location": "1-1", "port_number": 1, "mount_base": "/mnt/cam"},
+    "paths": {"local_staging": "/var/lib/camera_service/staging", "log_path": "/var/log/camera_service.log"},
+    "thresholds": {"disconnect_percent": 50, "shutdown_percent": 25},
+    "poll": {"interval_seconds": 30, "mount_timeout_seconds": 20, "upload_retries": 3},
+}
+#!/usr/bin/env python3
+"""
+camera_service.py (dry-run prototype)
+
+- Reads config YAML (if PyYAML available) or falls back to defaults
+- Polls `battery-info.sh` for JSON output
+- Checks reachability of configured host
+- Logs actions; in `--dry-run` mode it will not call control scripts
+- Supports `--once` for a single iteration (useful for testing)
+
+Run example (dry-run, single loop):
+
+  python3 camera_service.py --config config.example.yaml --dry-run --once
+
+"""
+import argparse
+import json
+import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+import shutil
 
 STOP = False
 
@@ -103,6 +150,8 @@ def main():
     parser.add_argument("--config", default="/home/pi/camera-scripts/config.example.yaml")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true", help="Run one iteration and exit")
+    parser.add_argument("--limit-files", type=int, default=None, help="Override config: max number of files to transfer")
+    parser.add_argument("--limit-bytes", type=int, default=None, help="Override config: max total bytes to transfer")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -117,15 +166,15 @@ def main():
 
     # Ensure control scripts exist
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    start_data = os.path.join(base_dir, "start-for-data.sh")
-    start_rec = os.path.join(base_dir, "start-for-recording.sh")
-    stop_all = os.path.join(base_dir, "stop-all-ports.sh")
+    start_data = os.path.join(base_dir, "logged-start-for-data.sh")
+    start_rec = os.path.join(base_dir, "logged-start-for-recording.sh")
+    stop_all = os.path.join(base_dir, "logged-stop-all-ports.sh")
 
     logging.info("Control scripts: data=%s rec=%s stop=%s", start_data, start_rec, stop_all)
 
     while not STOP:
         logging.info("Beginning poll iteration")
-        info = get_battery_info(os.path.join(base_dir, "battery-info.sh"))
+        info = get_battery_info(os.path.join(base_dir, "logged-battery-info.sh"))
         if info is None:
             logging.warning("No battery info available; skipping iteration")
         else:
@@ -149,10 +198,8 @@ def main():
                     logging.info("Host %s reachable=%s", host, reachable)
                     if reachable:
                         logging.info("Host reachable and battery sufficient — performing upload flow (dry_run=%s)", args.dry_run)
-                        # Enable data (allows camera to enumerate)
+                        # Enable data (allows camera to enumerate) and wait until device appears
                         maybe_run([start_data], dry_run=args.dry_run)
-                        logging.info("Waiting for device enumeration (sleep 3s)")
-                        time.sleep(3)
 
                         # Attempt to detect camera block device
                         try:
@@ -164,7 +211,13 @@ def main():
                             maybe_run([stop_all], dry_run=args.dry_run)
                             continue
 
-                        dev = device_detector.detect_camera_block_device(cfg, timeout=cfg.get('poll', {}).get('mount_timeout_seconds', 20))
+                        # allow a longer, more robust detection timeout (camera enumeration may be slow)
+                        cfg_timeout = cfg.get('poll', {}).get('mount_timeout_seconds', 20)
+                        detect_timeout = max(cfg_timeout, 60)
+                        if args.dry_run:
+                            dev = None
+                        else:
+                            dev = device_detector.wait_for_camera_device(hub=cfg.get('camera', {}).get('hub_location'), timeout=detect_timeout)
                         if not dev:
                             logging.warning('No camera block device detected; will disable data and continue')
                             maybe_run([stop_all], dry_run=args.dry_run)
@@ -181,8 +234,30 @@ def main():
                             logging.info('DRY-RUN: would run uploader to %s', host)
                         else:
                             try:
-                                with mount_helper.MountedDevice(dev, cfg.get('camera', {}).get('mount_base', '/mnt/cam'), readonly=True) as mount_path:
+                                # If the device is already automounted, prefer that mountpoint
+                                mount_path = None
+                                mounted_via_context = False
+                                if dev:
+                                    try:
+                                        existing = subprocess.run(['findmnt', '-n', '-o', 'TARGET', dev], capture_output=True, text=True, check=True)
+                                        candidate = existing.stdout.strip()
+                                        if candidate:
+                                            mount_path = candidate
+                                            logging.info('Device %s already mounted at %s; using existing mount', dev, mount_path)
+                                    except subprocess.CalledProcessError:
+                                        mount_path = None
+
+                                if not mount_path and dev:
+                                    # perform our own mount (will be auto-unmounted via context manager)
+                                    cm = mount_helper.MountedDevice(dev, cfg.get('camera', {}).get('mount_base', '/mnt/cam'), readonly=True)
+                                    mount_ctx = cm
+                                    mount_path = mount_ctx.__enter__()
                                     logging.info('Mounted camera at %s', mount_path)
+                                    mounted_via_context = True
+
+                                if not mount_path:
+                                    logging.warning('No mount path available for device; skipping copy')
+                                else:
                                     # compute size of camera contents (bytes)
                                     try:
                                         du = subprocess.run(['du', '-sb', mount_path], capture_output=True, text=True, check=True)
@@ -207,13 +282,59 @@ def main():
                                             logging.error('Not enough staging space: required=%d would_be_used=%d limit=%d; skipping copy', size_bytes, projected_used, max_allowed)
                                         else:
                                             logging.info('Enough space available; copying camera contents (%d bytes) to %s', size_bytes, staging_path)
-                                            mount_helper.copy_to_staging(mount_path, staging_path, use_rsync=True)
+                                            # Select files to copy according to config limits and strategy
+                                            copy_subdirs = cfg.get('camera', {}).get('copy_subdirs') or []
+                                            max_files = cfg.get('camera', {}).get('transfer_max_files')
+                                            max_bytes = cfg.get('camera', {}).get('transfer_max_bytes')
+                                            # CLI overrides
+                                            if args.limit_files is not None:
+                                                max_files = args.limit_files
+                                            if args.limit_bytes is not None:
+                                                max_bytes = args.limit_bytes
+                                            strategy = cfg.get('camera', {}).get('transfer_select_strategy', 'newest')
+
+                                            # If no explicit subdirs specified, search the whole mount
+                                            search_subdirs = copy_subdirs if copy_subdirs else ['.']
+
+                                            try:
+                                                selected = mount_helper.select_files_to_copy(mount_path, search_subdirs, max_files=max_files, max_bytes=max_bytes, strategy=strategy)
+                                            except Exception:
+                                                logging.exception('File selection failed; falling back to full copy')
+                                                selected = []
+
+                                            if not selected:
+                                                logging.info('No files selected for transfer (limits or missing files); skipping copy')
+                                            else:
+                                                logging.info('Selected %d files for transfer; copying to %s', len(selected), staging_path)
+                                                # Use relative paths from mount root; copy_to_staging will accept files_list
+                                                mount_helper.copy_to_staging(mount_path, staging_path, use_rsync=True, files_list=selected)
                                             logging.info('Copy complete; disabling camera data/power to conserve battery')
                             except Exception:
                                 logging.exception('Error during mount/copy flow')
+                            finally:
+                                # if we mounted via context, ensure we unmount
+                                try:
+                                    if 'mounted_via_context' in locals() and mounted_via_context:
+                                        mount_ctx.__exit__(None, None, None)
+                                except Exception:
+                                    logging.exception('Error unmounting device')
 
                             # disable data/power to conserve battery (or switch to recording mode as desired)
                             maybe_run([stop_all], dry_run=False)
+
+                            # Wait briefly for the device to disappear from /dev (ensure it's disconnected)
+                            try:
+                                if dev:
+                                    wait_deadline = time.time() + cfg.get('poll', {}).get('disconnect_wait_seconds', 10)
+                                    while time.time() < wait_deadline:
+                                        if not os.path.exists(dev):
+                                            logging.info('Device %s no longer present', dev)
+                                            break
+                                        time.sleep(0.5)
+                                    else:
+                                        logging.warning('Device %s still present after disconnect attempt', dev)
+                            except Exception:
+                                logging.exception('Error while waiting for device to disconnect')
 
                             # upload staged files
                             ok = uploader.upload_dir(staging, cfg.get('upload', {}), dry_run=False, retries=cfg.get('poll', {}).get('upload_retries', 3))

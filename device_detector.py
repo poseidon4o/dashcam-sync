@@ -106,6 +106,49 @@ def wait_for_block_device(vid: Optional[str] = None,
         time.sleep(poll_interval)
 
 
+def wait_for_camera_device(vid: Optional[str] = None,
+                           pid: Optional[str] = None,
+                           hub: Optional[str] = None,
+                           timeout: float = 60.0,
+                           poll_interval: float = 1.0) -> Optional[str]:
+    """More robust wait that also checks /dev/disk/by-id for usb- entries.
+
+    This handles devices that take a long or inconsistent time to enumerate.
+    Returns a block device path like /dev/sda1 or None on timeout.
+    """
+    start = time.time()
+    seen_byid = set()
+    while True:
+        # First try the normal sysfs-based detection
+        dev = wait_for_block_device(vid=vid, pid=pid, hub=hub, timeout=0.1, poll_interval=0.1)
+        if dev:
+            return dev
+
+        # Then look for /dev/disk/by-id usb-* entries (common for mass-storage cameras)
+        try:
+            for entry in os.listdir('/dev/disk/by-id'):
+                if entry.startswith('usb-') or 'NOVATEKN' in entry or 'vt-DSC' in entry:
+                    path = os.path.join('/dev/disk/by-id', entry)
+                    try:
+                        real = os.path.realpath(path)
+                        if os.path.exists(real):
+                            # return first new device we haven't seen
+                            if real not in seen_byid:
+                                logger.debug('Detected by-id device %s -> %s', entry, real)
+                                seen_byid.add(real)
+                                return real
+                    except Exception:
+                        continue
+        except FileNotFoundError:
+            # /dev/disk/by-id not present yet
+            pass
+
+        if time.time() - start > timeout:
+            logger.debug('Timeout waiting for camera device (vid=%s pid=%s hub=%s)', vid, pid, hub)
+            return None
+        time.sleep(poll_interval)
+
+
 def detect_camera_block_device(cfg: dict, timeout: float = 20.0) -> Optional[str]:
     """High-level detection using config keys.
 

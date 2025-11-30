@@ -47,7 +47,19 @@ def build_rsync_command(source: str, dest: str, *, ssh_key: Optional[str] = None
     if host and host not in ('localhost', '127.0.0.1'):
         ssh_parts = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null']
         if ssh_key:
-            ssh_parts.extend(['-i', ssh_key])
+            # Only pass an identity file to ssh if it actually exists. If the
+            # configured key path is missing, rely on system SSH agent or
+            # default keys (so users who can `ssh host` without params still
+            # work). Log a warning to help debugging.
+            try:
+                if os.path.exists(ssh_key) and os.path.isfile(ssh_key):
+                    ssh_parts.extend(['-i', ssh_key])
+                else:
+                    logger.warning('Configured SSH key %s not found; not passing -i', ssh_key)
+            except Exception:
+                # In case of any filesystem oddities, avoid failing and do not
+                # force an identity file.
+                logger.exception('Error checking SSH key %s; skipping -i', ssh_key)
         if port:
             ssh_parts.extend(['-p', str(port)])
         cmd.extend(['-e', ' '.join(ssh_parts)])
@@ -66,7 +78,8 @@ def build_rsync_command(source: str, dest: str, *, ssh_key: Optional[str] = None
 
 
 def upload_dir(staging_dir: str, upload_cfg: Dict, dry_run: bool = True, retries: int = 3,
-               backoff_factor: float = 2.0, initial_delay: float = 2.0) -> bool:
+               backoff_factor: float = 2.0, initial_delay: float = 2.0,
+               run_as_user: Optional[str] = None) -> bool:
     """Upload the contents of `staging_dir` per `upload_cfg`.
 
     upload_cfg keys: method (rsync), host, user, port, dest_path, ssh_key
@@ -94,6 +107,21 @@ def upload_dir(staging_dir: str, upload_cfg: Dict, dry_run: bool = True, retries
     cmd = build_rsync_command(staging_dir, dest, ssh_key=ssh_key, host=host, user=user, port=port)
     logger.info('Rsync command: %s', ' '.join(shlex.quote(c) for c in cmd))
 
+    # If running as root and no explicit run_as_user given, attempt to
+    # execute the rsync under the original sudo caller so that the caller's
+    # SSH keys/agent are used (SUDO_USER is set by sudo).
+    if run_as_user is None and os.geteuid() == 0:
+        run_as_user = os.environ.get('SUDO_USER')
+
+    final_cmd = cmd
+    if run_as_user:
+        # Prefix the rsync command so it executes as the given user. Root can
+        # sudo to any user without password, so this keeps the uploader
+        # process running as root while the network transfer uses the
+        # non-root user's SSH credentials.
+        final_cmd = ['sudo', '-u', run_as_user, '--'] + cmd
+        logger.info('Will run rsync as user: %s', run_as_user)
+
     attempt = 0
     delay = initial_delay
     while attempt <= retries:
@@ -103,7 +131,7 @@ def upload_dir(staging_dir: str, upload_cfg: Dict, dry_run: bool = True, retries
             return True
         try:
             logger.info('Running rsync (attempt %d)', attempt)
-            subprocess.run(cmd, check=True)
+            subprocess.run(final_cmd, check=True)
             logger.info('Rsync completed successfully')
             return True
         except subprocess.CalledProcessError as e:

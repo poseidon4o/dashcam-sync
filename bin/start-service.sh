@@ -4,17 +4,6 @@ set -euo pipefail
 # Starts and enables the `camera_service.service` via systemd. Will use sudo if not run as root.
 
 SERVICE=camera_service.service
-
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Starting $SERVICE (requires sudo)..."
-  exec sudo systemctl daemon-reload
-  exec sudo systemctl enable --now "$SERVICE"
-#!/usr/bin/env bash
-set -euo pipefail
-# start-service.sh
-# Starts and enables the `camera_service.service` via systemd. Will use sudo if not run as root.
-
-SERVICE=camera_service.service
 LOG_DIR=/var/log/camera
 LOG_FILE="$LOG_DIR/start-service.log"
 mkdir -p "$LOG_DIR" 2>/dev/null || true

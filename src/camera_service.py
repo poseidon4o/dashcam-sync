@@ -44,52 +44,6 @@ DEFAULT_CONFIG = {
     "thresholds": {"disconnect_percent": 50, "shutdown_percent": 25},
     "poll": {"interval_seconds": 30, "mount_timeout_seconds": 20, "upload_retries": 3},
 }
-#!/usr/bin/env python3
-"""
-camera_service.py (dry-run prototype)
-
-- Reads config YAML (if PyYAML available) or falls back to defaults
-- Polls `battery-info.sh` for JSON output
-- Checks reachability of configured host
-- Logs actions; in `--dry-run` mode it will not call control scripts
-- Supports `--once` for a single iteration (useful for testing)
-
-Run example (dry-run, single loop):
-
-  python3 camera_service.py --config config.example.yaml --dry-run --once
-
-"""
-import argparse
-import json
-import logging
-import os
-import signal
-import socket
-import subprocess
-import sys
-import time
-import shutil
-
-STOP = False
-
-
-def handle_sigterm(signum, frame):
-    global STOP
-    logging.info("Received signal %s, stopping", signum)
-    STOP = True
-
-
-signal.signal(signal.SIGINT, handle_sigterm)
-signal.signal(signal.SIGTERM, handle_sigterm)
-
-
-DEFAULT_CONFIG = {
-    "upload": {"method": "rsync", "host": "192.168.1.203", "port": 22},
-    "camera": {"hub_location": "1-1", "port_number": 1, "mount_base": "/mnt/cam"},
-    "paths": {"local_staging": "/var/lib/camera_service/staging", "log_path": "/var/log/camera_service.log"},
-    "thresholds": {"disconnect_percent": 50, "shutdown_percent": 25},
-    "poll": {"interval_seconds": 30, "mount_timeout_seconds": 20, "upload_retries": 3},
-}
 
 
 def load_config(path):
@@ -164,17 +118,19 @@ def main():
     disconnect_pct = cfg.get("thresholds", {}).get("disconnect_percent", 50)
     shutdown_pct = cfg.get("thresholds", {}).get("shutdown_percent", 25)
 
-    # Ensure control scripts exist
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    start_data = os.path.join(base_dir, "logged-start-for-data.sh")
-    start_rec = os.path.join(base_dir, "logged-start-for-recording.sh")
-    stop_all = os.path.join(base_dir, "logged-stop-all-ports.sh")
+    # Ensure control scripts exist in the repo sibling `bin` directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    bin_dir = os.path.join(repo_root, 'bin')
+    start_data = os.path.join(bin_dir, "logged-start-for-data.sh")
+    start_rec = os.path.join(bin_dir, "logged-start-for-recording.sh")
+    stop_all = os.path.join(bin_dir, "logged-stop-all-ports.sh")
 
     logging.info("Control scripts: data=%s rec=%s stop=%s", start_data, start_rec, stop_all)
 
     while not STOP:
         logging.info("Beginning poll iteration")
-        info = get_battery_info(os.path.join(base_dir, "logged-battery-info.sh"))
+        info = get_battery_info(os.path.join(bin_dir, "logged-battery-info.sh"))
         if info is None:
             logging.warning("No battery info available; skipping iteration")
         else:

@@ -1,4 +1,3 @@
-# Remove the opening markdown fence
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -24,7 +23,6 @@ VOUT_V=$(printf "%.2f" "$(echo "$VOUT / 1000" | bc -l)")
 IOUT_A=$(printf "%.2f" "$(echo "$IOUT / 1000" | bc -l)")
 POWER_W=$(printf "%.2f" "$(echo "$VOUT_V * $IOUT_A" | bc -l)")
 
-# Refined LiFePO4 voltage → percentage curve
 battery_pct() {
   local v=$1
 

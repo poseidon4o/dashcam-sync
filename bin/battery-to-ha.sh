@@ -5,7 +5,7 @@ set -euox pipefail
 # ---------- CONFIGURATION ----------
 srv_name="rpi_lifepo4"
 url_base="http://192.168.1.128:8123/api/states"
-token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI4ODQwMmE2ZTlkZjM0ZTZkYmIxMmQyYzIyOGJmYjIxNCIsImlhdCI6MTc2NDAxODg3MCwiZXhwIjoyMDc5Mzc4ODcwfQ.CfRjfKU6zuu3EVCjQFGCI2TdcOPkOFK7fGytfnVHns4"
+token="REDACTED"
 
 DEVICE_IDENTIFIERS="[\"${srv_name}\"]"
 DEVICE_NAME="LiFePO4wered Pi UPS"
@@ -65,7 +65,6 @@ VOUT_V=$(printf "%.2f" "$(echo "$VOUT / 1000" | bc -l)")
 IOUT_A=$(printf "%.2f" "$(echo "$IOUT / 1000" | bc -l)")
 POWER_W=$(printf "%.2f" "$(echo "$VOUT_V * $IOUT_A" | bc -l)")
 
-# LiFePO4 voltage → percentage curve
 battery_pct() {
   local v=$1
 
@@ -85,8 +84,6 @@ battery_pct() {
 }
 
 BATTERY_PERCENT=$(battery_pct "$VBAT_V")
-
-# ---------- UPLOAD TO HOME ASSISTANT ----------
 
 send_to_ha "battery_voltage" "$VBAT_V" \
   "Battery Voltage" "mdi:battery" "voltage" "V" "measurement"
@@ -108,4 +105,3 @@ send_to_ha "output_power" "$POWER_W" \
 
 send_to_ha "pi_running" "$PI_RUNNING" \
   "Pi Running" "mdi:raspberry-pi" "" "" ""
-

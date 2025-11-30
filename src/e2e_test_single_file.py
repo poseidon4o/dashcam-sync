@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
 """e2e_test_single_file.py
 
-End-to-end test that:
-1) enables camera data for transfer
-2) waits for the camera to connect (block device)
-3) transfers 1 file to a local staging directory
-4) disconnects the camera
-5) uploads the staged file to the configured remote host
-
-Run as root/sudo when needing to toggle hardware power (start/stop scripts).
-
-Usage:
-  sudo python3 e2e_test_single_file.py --config config.yaml
-
-Options:
-  --config PATH     Path to config YAML/JSON (default: ./config.yaml)
-  --timeout SECS    Seconds to wait for device enumeration (default: 120)
-  --dry-run         Do not actually run start/stop or upload (useful for testing)
-  --staging DIR     Optional staging base directory override
+End-to-end test that exercises the full hardware + staging + upload flow.
 """
 from __future__ import annotations
 
@@ -68,15 +52,17 @@ def main():
     ap.add_argument('--timeout', type=int, default=120)
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--staging', default=None)
-    ap.add_argument('--max-files', type=int, default=1, help='Number of files to select and transfer')
+    ap.add_argument('--max-files', type=int, default=1, help='Maximum number of files to select and transfer')
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     cfg = load_config(args.config) or {}
 
-    base = os.path.dirname(os.path.abspath(__file__))
-    start_data = os.path.join(base, 'logged-start-for-data.sh')
-    stop_all = os.path.join(base, 'logged-stop-all-ports.sh')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    bin_dir = os.path.join(repo_root, 'bin')
+    start_data = os.path.join(bin_dir, 'logged-start-for-data.sh')
+    stop_all = os.path.join(bin_dir, 'logged-stop-all-ports.sh')
 
     upload_cfg = cfg.get('upload', {})
     camera_cfg = cfg.get('camera', {})
@@ -85,7 +71,6 @@ def main():
     staging_base = args.staging or paths_cfg.get('local_staging', '/var/lib/camera_service/staging')
     ensure_dir(staging_base)
 
-    # Step 1: enable camera data
     if args.dry_run:
         logging.info('DRY-RUN: would enable camera data via %s', start_data)
     else:
@@ -93,8 +78,7 @@ def main():
         if not ok:
             logging.warning('start-for-data script returned non-zero; continuing anyway')
 
-    # import helpers
-    sys.path.insert(0, base)
+    sys.path.insert(0, script_dir)
     try:
         import device_detector
         import mount_helper
@@ -103,7 +87,6 @@ def main():
         logging.exception('Failed to import modules: %s', e)
         return 2
 
-    # Step 2: wait for block device
     logging.info('Waiting up to %s seconds for camera block device...', args.timeout)
     dev = None
     if not args.dry_run:
@@ -116,7 +99,6 @@ def main():
 
     logging.info('Detected device: %s', dev)
 
-    # find mount point (prefer automount)
     mount_path = None
     mounted_via_context = False
     mount_ctx = None
@@ -131,7 +113,6 @@ def main():
             pass
 
         if not mount_path:
-            # try partitions (sda1 etc)
             base_name = os.path.basename(dev)
             dev_dir = '/dev'
             possible = []
@@ -150,7 +131,6 @@ def main():
                     continue
 
         if not mount_path:
-            # attempt to mount first partition or device using our context manager
             part = None
             if possible:
                 part = possible[0]
@@ -169,9 +149,14 @@ def main():
             run_cmd([stop_all])
             return 4
 
-        # Step 3: select 1 file and copy
         copy_subdirs = camera_cfg.get('copy_subdirs') or ['.']
-        selected = mount_helper.select_files_to_copy(mount_path, copy_subdirs, max_files=args.max_files, max_bytes=None, strategy=camera_cfg.get('transfer_select_strategy', 'newest'))
+        selected = mount_helper.select_files_to_copy(
+            mount_path,
+            copy_subdirs,
+            max_files=args.max_files,
+            max_bytes=None,
+            strategy=camera_cfg.get('transfer_select_strategy', 'newest'),
+        )
         if not selected:
             logging.error('No files selected for transfer; cleaning up and exiting')
             if mounted_via_context and mount_ctx:
@@ -189,20 +174,17 @@ def main():
         else:
             mount_helper.copy_to_staging(mount_path, staging_dir, use_rsync=True, files_list=selected)
 
-        # verify file exists in staging
         staged_entries = []
         for root, dirs, files in os.walk(staging_dir):
             for f in files:
                 staged_entries.append(os.path.relpath(os.path.join(root, f), staging_dir))
         logging.info('Staged entries: %s', staged_entries)
 
-        # Step 4: disconnect camera
         if args.dry_run:
             logging.info('DRY-RUN: would disable camera via %s', stop_all)
         else:
             run_cmd([stop_all])
 
-        # wait for device removal
         if not args.dry_run:
             deadline = time.time() + 30
             while time.time() < deadline:
@@ -213,14 +195,12 @@ def main():
             else:
                 logging.warning('Device still present after wait')
 
-        # ensure we unmount if we mounted it
         if mounted_via_context and mount_ctx:
             try:
                 mount_ctx.__exit__(None, None, None)
             except Exception:
                 logging.exception('Error while unmounting')
 
-        # Step 5: upload staged content
         if args.dry_run:
             logging.info('DRY-RUN: would upload staging dir %s to %s', staging_dir, upload_cfg.get('dest_path'))
         else:
@@ -228,7 +208,6 @@ def main():
             if ok:
                 logging.info('Upload succeeded; removing staged dir %s', staging_dir)
                 try:
-                    # remove staged contents
                     for entry in os.listdir(staging_dir):
                         path = os.path.join(staging_dir, entry)
                         if os.path.isdir(path):
@@ -236,7 +215,6 @@ def main():
                             shutil.rmtree(path)
                         else:
                             os.remove(path)
-                    # remove staging dir itself
                     os.rmdir(staging_dir)
                 except Exception:
                     logging.exception('Failed to clean up staging after upload')
@@ -244,7 +222,6 @@ def main():
                 logging.error('Upload failed; staged files remain at %s', staging_dir)
 
     finally:
-        # best-effort cleanup
         try:
             if mounted_via_context and mount_ctx:
                 mount_ctx.__exit__(None, None, None)

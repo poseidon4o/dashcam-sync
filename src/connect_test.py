@@ -2,14 +2,7 @@
 """
 connect_test.py
 
-Performs a live connect/disconnect test without copying files:
- - Enables camera data via `start-for-data.sh`
- - Waits for block device via `device_detector.wait_for_camera_device`
- - Prefers automount and lists a few files under configured subdir(s)
- - Disables camera via `stop-all-ports.sh`
- - Waits for device removal
-
-Usage: python3 connect_test.py --config config.yaml
+Performs a live connect/disconnect test without copying files.
 """
 import argparse
 import json
@@ -49,21 +42,21 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    base = os.path.dirname(os.path.abspath(__file__))
-    start_data = os.path.join(base, 'logged-start-for-data.sh')
-    stop_all = os.path.join(base, 'logged-stop-all-ports.sh')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    bin_dir = os.path.join(repo_root, 'bin')
+    start_data = os.path.join(bin_dir, 'logged-start-for-data.sh')
+    stop_all = os.path.join(bin_dir, 'logged-stop-all-ports.sh')
 
     cfg = load_config(args.config) or {}
     copy_subdirs = cfg.get('camera', {}).get('copy_subdirs') or ['Normal/Front']
 
-    # ensure workspace on PYTHONPATH for local imports
-    sys.path.insert(0, base)
+    sys.path.insert(0, script_dir)
 
     print('Enabling camera data...')
     if not run([start_data]):
         print('Warning: start-for-data.sh returned non-zero')
 
-    # import device detector
     try:
         import device_detector
     except Exception as e:
@@ -74,13 +67,11 @@ def main():
     dev = device_detector.wait_for_camera_device(hub=cfg.get('camera', {}).get('hub_location'), timeout=args.timeout)
     if not dev:
         print('No device detected within timeout')
-        # disable data to restore state
         run([stop_all])
         return 2
 
     print('Detected device:', dev)
 
-    # prefer existing automount
     mount_point = None
     try:
         p = subprocess.run(['findmnt', '-n', '-o', 'TARGET', dev], capture_output=True, text=True)
@@ -93,7 +84,6 @@ def main():
 
     if not mount_point:
         print('No automount detected; attempting to locate partition under /dev/disk/by-id')
-        # try to find any partition device for the block (e.g., /dev/sda1)
         base_name = os.path.basename(dev)
         dev_dir = '/dev'
         possible = []
@@ -102,7 +92,6 @@ def main():
                 possible.append(os.path.join(dev_dir, entry))
         if possible:
             print('Found partition candidates:', possible)
-            # choose first and see if mounted
             for pdev in possible:
                 try:
                     p = subprocess.run(['findmnt', '-n', '-o', 'TARGET', pdev], capture_output=True, text=True)
@@ -117,14 +106,12 @@ def main():
     if not mount_point:
         print('No mount point detected; the system may not automount. Files may still be on the device partition.')
     else:
-        # list some files from configured subdirs or run selection if limits provided
         try:
             import mount_helper
         except Exception as e:
             print('Failed to import mount_helper:', e)
             mount_helper = None
 
-        # If limits provided, run selection and print chosen files
         if args.limit_files is not None or args.limit_bytes is not None:
             max_files = args.limit_files
             max_bytes = args.limit_bytes
@@ -155,7 +142,6 @@ def main():
     print('\nDisabling camera data/power...')
     run([stop_all])
 
-    # wait for device removal
     print('Waiting for device to disappear...')
     deadline = time.time() + 30
     while time.time() < deadline:

@@ -23,3 +23,5 @@ env/
 
 # Ignore systemd unit installs and runtime state
 /var/lib/camera_service/
+local_files
+local_files.txt

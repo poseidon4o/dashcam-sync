@@ -16,9 +16,16 @@ IOUT=$(get_val IOUT)
 PI_RUNNING=$(get_val PI_RUNNING)
 WAKE_TIME=$(get_val WAKE_TIME)
 AUTO_SHDN_TIME=$(get_val AUTO_SHDN_TIME)
+VBAT_OFFSET=$(get_val VBAT_OFFSET)
 
 VIN_V=$(printf "%.2f" "$(echo "$VIN / 1000" | bc -l)")
-VBAT_V=$(printf "%.2f" "$(echo "$VBAT / 1000" | bc -l)")
+# Apply optional VBAT offset if provided by lifepo4wered-cli (small calibration value)
+VBAT_ADJ=$VBAT
+if [ -n "${VBAT_OFFSET:-}" ] && [ "$VBAT_OFFSET" -ne 0 ]; then
+  # VBAT_OFFSET from device is in millivolts; add before converting to volts
+  VBAT_ADJ=$((VBAT + VBAT_OFFSET))
+fi
+VBAT_V=$(printf "%.2f" "$(echo "$VBAT_ADJ / 1000" | bc -l)")
 VOUT_V=$(printf "%.2f" "$(echo "$VOUT / 1000" | bc -l)")
 IOUT_A=$(printf "%.2f" "$(echo "$IOUT / 1000" | bc -l)")
 POWER_W=$(printf "%.2f" "$(echo "$VOUT_V * $IOUT_A" | bc -l)")

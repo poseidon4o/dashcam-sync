@@ -8,16 +8,12 @@ import argparse
 
 logger = logging.getLogger(__name__)
 
-LOCAL_FILES_DIR = '/home/pi/camera-scripts/local_files/'
+LOCAL_FILES_DIR = '/opt/dashcam/'
 LOCAL_FILES_LIST = '/home/pi/camera-scripts/local_files.txt'
+CAMERA_MOUNT_POINT = '/mnt/cam/'
 
 REMAINING_LOCAL_SPACE = 1024 * 1024 * 1024  # 1GB
 SYS_PATH_ENABLE_USB = '/sys/bus/usb/devices/1-1/authorized'
-
-REMOTE_HOST = '192.168.1.203'
-REMOTE_FILE_LIST = '/home/pi/uploads.txt'
-REMOTE_FILE_DIR = '/home/pi/uploads/'
-
 
 class GlobalTestableCommands:
     REGISTERED_FUNCTIONS = {}
@@ -31,7 +27,7 @@ class GlobalTestableCommands:
         parser.add_argument('--test', type=str, help='Run in test mode without executing commands')
 
     def run(self, args):
-        if 'test' not in args or len(args.test) == 0:
+        if args.test is None or len(args.test) == 0:
             logger.warning(f'No test function specified')
             return False
         if args.test in GlobalTestableCommands.REGISTERED_FUNCTIONS:
@@ -53,7 +49,7 @@ async def run_command(command: str) -> str:
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         logger.error(f'Command "{command}" failed with error: {stderr.decode().strip()}')
-        return ''
+        return -1, '', stderr.decode().strip()
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
 
@@ -181,7 +177,7 @@ async def mount_camera():
     await set_camera_usb(True)
     await set_usb_port_power(True)
     await wait_for_camera_usb_connect()
-    code, out, err = await run_command('mount -t vfat -o rw,uid=1000,gid=1000,umask=022 UUID=67EF-9CED /mnt/cam')
+    code, out, err = await run_command(f'mount -t vfat -o rw,uid=1000,gid=1000,umask=022 UUID=67EF-9CED {CAMERA_MOUNT_POINT}')
     if code != 0:
         logger.error(f'Error mounting camera: {err}')
         return False
@@ -204,34 +200,14 @@ async def disconnect_camera():
 
 
 @GlobalTestableCommands.testable_function
-async def is_host_reachable():
-    logger.debug(f'Pinging host {REMOTE_HOST} to check reachability')
-    code, _, _ = await run_command(f'ping -c 1 -W 1 {REMOTE_HOST}')
-    is_reachable = code == 0
-    logger.info(f'Host {REMOTE_HOST} is {"reachable" if is_reachable else "not reachable"}')
-    return is_reachable
-
-
-async def wait_for_host():
-    logger.info(f'Waiting for host {REMOTE_HOST} to become reachable')
-    retry_interval = 5.0
-    while True:
-        if await is_host_reachable():
-            logger.info(f'Host {REMOTE_HOST} is reachable')
-            return True
-        logger.debug(f'Waiting for host {REMOTE_HOST} to become reachable')
-        await asyncio.sleep(retry_interval)
-
-
-async def wait_for_no_host():
-    logger.info(f'Waiting for host {REMOTE_HOST} to become unreachable')
-    retry_interval = 5.0
-    while True:
-        if not is_host_reachable():
-            logger.info(f'Host {REMOTE_HOST} is not reachable')
-            return True
-        logger.debug(f'Waiting for host {REMOTE_HOST} to become unreachable')
-        await asyncio.sleep(retry_interval)
+async def ensure_permissions():
+    logger.info('Ensuring permissions for downloaded files')
+    code, out, err = await run_command(f'chown -R cam-downloader:cam-downloader {LOCAL_FILES_DIR}')
+    if code != 0:
+        logger.error(f'Error setting permissions: {err}')
+        return False
+    logger.info(f'Permissions set successfully: {out}')
+    return True
 
 
 @GlobalTestableCommands.testable_function
@@ -248,12 +224,13 @@ async def get_missing_files():
 
     def get_camera_files_set():
         files_set = set()
-        camera_files_list = '/mnt/cam/Normal/Front/'
+        camera_files_list = f'{CAMERA_MOUNT_POINT}/Normal/Front/'
         if not os.path.exists(camera_files_list):
             return files_set
         files_set = glob.glob(os.path.join(camera_files_list, '*.MP4'))
         return set(os.path.basename(f) for f in files_set)
 
+    await ensure_permissions()
     local_files = await asyncio.to_thread(get_local_files_set)
     camera_files = await asyncio.to_thread(get_camera_files_set)
     missing_files = camera_files - local_files
@@ -264,8 +241,9 @@ async def get_missing_files():
 @GlobalTestableCommands.testable_function
 async def copy_files_to_staging():
     file_list = await get_missing_files()
+    remaining_files = len(file_list)
     for filename in file_list:
-        src_path = os.path.join('/mnt/cam/Normal/Front/', filename)
+        src_path = os.path.join(f'{CAMERA_MOUNT_POINT}/Normal/Front/', filename)
         space_stats = await get_local_space_stats()
         transfer_file_size = os.path.getsize(src_path)
         reimaining_after_transfer = int(space_stats['available']) * 1024 - transfer_file_size
@@ -279,8 +257,10 @@ async def copy_files_to_staging():
         dest_path = os.path.join(LOCAL_FILES_DIR, filename)
         code, _, _, = await run_command(f'rsync -a --info=progress2 "{src_path}" "{dest_path}"')
         if code == 0:
-            logger.info(f'Copied file {filename} to staging')
-            with open('/home/pi/camera-scripts/local_files.txt', 'a') as f:
+            await ensure_permissions()
+            remaining_files -= 1
+            logger.info(f'Copied file {filename} to staging, remaining files: {remaining_files}')
+            with open(LOCAL_FILES_LIST, 'a') as f:
                 f.write(f'{filename}\n')
 
 
@@ -304,13 +284,12 @@ async def service_main():
         await copy_files_to_staging() # if in range of host, it will extract
         await set_usb_port_power(False)
         await start_camera_recording()
-        await wait_for_no_host()
         await asyncio.sleep(300)  # wait 5 min
-        await wait_for_host()
         await set_usb_port_power(False)
 
 
 def main():
+    os.makedirs(CAMERA_MOUNT_POINT, exist_ok=True)
     os.makedirs(LOCAL_FILES_DIR, exist_ok=True)
     if not os.path.exists(LOCAL_FILES_LIST):
         with open(LOCAL_FILES_LIST, 'w'): pass
@@ -335,6 +314,7 @@ def main():
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
+    logger.info('=' * 20 + ' Dashcam Service Starting ' + '=' * 20)
     logger.info(f'Args: {args}')
 
     if tester.run(args):

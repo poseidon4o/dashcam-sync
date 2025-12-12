@@ -1,0 +1,17 @@
+[Unit]
+Description=Dashcam Sync Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/camera-scripts/
+ExecStart=/usr/bin/python3 /home/pi/camera-scripts/service.py
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+StandardOutput=append:/var/log/camera/service.log
+StandardError=append:/var/log/camera/service.log
+
+[Install]
+WantedBy=multi-user.target

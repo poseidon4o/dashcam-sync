@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 LOCAL_FILES_DIR = '/opt/dashcam/'
 LOCAL_FILES_LIST = '/home/pi/camera-scripts/local_files.txt'
 CAMERA_MOUNT_POINT = '/mnt/cam/'
+CAMERA_DEVICE_PATH = '/dev/disk/by-id/usb-NOVATEKN_vt-DSC_96680-00000-001-0:0'
 
 REMAINING_LOCAL_SPACE = 1024 * 1024 * 1024  # 1GB
 SYS_PATH_ENABLE_USB = '/sys/bus/usb/devices/1-1/authorized'
@@ -134,7 +135,7 @@ async def get_battery_stats():
         'wake_timer_remaining': int(stats_map.get('WAKE_TIME', '0')),
         'ac_power': float(stats_map.get('VIN', '0')) >= float(stats_map.get('VIN_THRESHOLD', '0')),
     }
-    logger.info(f'Battery voltage remaining: {result["minium_boot_voltage"] - result["battery_voltage"]}V, AC power: {result["ac_power"]}')
+    logger.info(f'Battery voltage remaining: {result["battery_voltage"] - result["minium_boot_voltage"]}V, AC power: {result["ac_power"]}')
     return result
 
 
@@ -149,14 +150,17 @@ async def set_camera_usb(enable: bool):
     return True
 
 
+def is_camera_connected():
+    return os.path.exists(CAMERA_DEVICE_PATH)
+
+
 async def wait_for_camera_usb_connect():
-    device_path = '/dev/disk/by-id/usb-NOVATEKN_vt-DSC_96680-00000-001-0:0'
     retry_interval = 0.5
-    logger.info(f'Waiting for camera {device_path} USB device to connect, checking every {retry_interval} seconds')
+    logger.info(f'Waiting for camera {CAMERA_DEVICE_PATH} USB device to connect, checking every {retry_interval} seconds')
     while True:
-        if os.path.exists(device_path):
+        if is_camera_connected():
             return True
-        logger.debug('Waiting for camera device at %s', device_path)
+        logger.debug('Waiting for camera device at %s', CAMERA_DEVICE_PATH)
         await asyncio.sleep(retry_interval)
 
 
@@ -190,12 +194,14 @@ async def start_camera_recording():
     logger.info(f'Starting camera recording mode')
     await set_camera_usb(False)
     await set_usb_port_power(True)
+    logger.info('Camera recording started; waiting for 25 seconds to stabilize')
     await asyncio.sleep(25)
 
 
 @GlobalTestableCommands.testable_function
 async def disconnect_camera():
     await set_usb_port_power(False)
+    logger.info('Camera disconnected; waiting for 20 seconds to ensure power down')
     await asyncio.sleep(20)
 
 
@@ -243,6 +249,9 @@ async def copy_files_to_staging():
     file_list = await get_missing_files()
     remaining_files = len(file_list)
     for filename in file_list:
+        if not is_camera_connected():
+            logger.warning('Camera disconnected during file copy; stopping copy')
+            return
         src_path = os.path.join(f'{CAMERA_MOUNT_POINT}/Normal/Front/', filename)
         space_stats = await get_local_space_stats()
         transfer_file_size = os.path.getsize(src_path)
@@ -264,7 +273,9 @@ async def copy_files_to_staging():
                 f.write(f'{filename}\n')
 
 
+@GlobalTestableCommands.testable_function
 async def task_disconnect_on_low_battery():
+    # TODO: interrupt all other tasks and go to sleep mode
     while True:
         stats = await get_battery_stats()
         if stats['ac_power'] or stats['battery_voltage'] > stats['minium_boot_voltage']:
@@ -275,17 +286,56 @@ async def task_disconnect_on_low_battery():
             break
 
 
-async def service_main():
-    asyncio.create_task(task_disconnect_on_low_battery())
-    await disconnect_camera()
+async def task_disconnect_camera_on_ac():
+    logger.info('Starting task to monitor AC power and disconnect camera when plugged in')
     while True:
-        await mount_camera()
-        await wait_for_camera_usb_connect()
-        await copy_files_to_staging() # if in range of host, it will extract
-        await set_usb_port_power(False)
-        await start_camera_recording()
-        await asyncio.sleep(300)  # wait 5 min
-        await set_usb_port_power(False)
+        stats = await get_battery_stats()
+        if stats['ac_power']:
+            logger.info('No AC power detected; disconnecting camera')
+            await disconnect_camera()
+            return
+        await asyncio.sleep(1)
+
+
+@GlobalTestableCommands.testable_function
+async def copy_files_while_no_ac():
+    await mount_camera()
+    await asyncio.gather(
+        copy_files_to_staging(),
+        task_disconnect_camera_on_ac()
+    )
+
+
+@GlobalTestableCommands.testable_function
+async def wait_for_no_ac_power():
+    stats = await get_battery_stats()
+    logger.info(f'Waiting for AC power to be disconnected, current state: {stats["ac_power"]}')
+    while True:
+        stats = await get_battery_stats()
+        if not stats['ac_power']:
+            logger.info('AC power disconnected')
+            return
+        await asyncio.sleep(1)
+
+
+async def service_main():
+    # asyncio.create_task(task_disconnect_on_low_battery())
+
+    await disconnect_camera()
+
+    while True:
+        is_on_ac = (await get_battery_stats())['ac_power']
+        logger.info(f'service_main: Starting new cycle; on AC power: {is_on_ac}')
+        if is_on_ac:
+            await start_camera_recording()
+            logger.info('service_main: On AC power, recording started; waiting for AC power loss')
+            await wait_for_no_ac_power() # block until AC power is lost
+            logger.info('service_main: AC power lost, disconnecing camera')
+            await disconnect_camera()
+        else: # on battery power
+            logger.info('service_main: On battery power; starting file copy from camera')
+            await copy_files_while_no_ac()
+            logger.info('service_main: File copy complete or interrupted; disconnecting camera')
 
 
 def main():

@@ -318,8 +318,50 @@ async def wait_for_no_ac_power():
         await asyncio.sleep(1)
 
 
+@GlobalTestableCommands.testable_function
+async def get_wifi_interface_info():
+    logger.info('Getting wifi interface UUIDs')
+    code, out, err = await run_command('nmcli -t -f NAME,DEVICE,UUID,STATE connection show')
+    if code != 0:
+        logger.error(f'Error checking network status: {err}')
+        return dict()
+    interface_info = {}
+    for line in out.splitlines():
+        name, interface, uuid, state = line.split(':')
+        if 'wlan' in interface:
+            interface_info[interface] = {
+                'uuid': uuid,
+                'state': state,
+                'name': name
+            }
+    logger.info(f'WiFi interfaces: {interface_info}')
+    return interface_info
+
+
+async def ensure_wifi():
+    while True:
+        interfaces = await get_wifi_interface_info()
+        for interface, info in interfaces.items():
+            if info['state'] == 'activated':
+                logger.info(f'WiFi interface {interface} is active')
+                continue
+            else:
+                logger.info(f'WiFi interface {interface} is not active; attempting to connect')
+                code, out, err = await run_command(f'nmcli connection up uuid {info["uuid"]}')
+                if code == 0:
+                    logger.info(f'WiFi interface {interface} connected successfully')
+                    return True
+                else:
+                    logger.error(f'Error connecting WiFi interface {interface}: {err}')
+        logger.info('No active WiFi interfaces found; retrying in 10 seconds')
+        await asyncio.sleep(10)
+
+    return True
+
+
 async def service_main():
     # asyncio.create_task(task_disconnect_on_low_battery())
+    asyncio.create_task(ensure_wifi())
 
     await disconnect_camera()
 

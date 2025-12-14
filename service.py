@@ -167,7 +167,7 @@ async def wait_for_camera_usb_connect():
 async def set_usb_port_power(enabled: bool):
     logger.info(f'Setting USB port power to {"on" if enabled else "off"}')
     action = 'on' if enabled else 'off'
-    code, out, err = await run_command(f'uhubctl -l 1-1 -a {action}')
+    code, out, err = await run_command(f'uhubctl -l 1-1 -p 1 -a {action}')
     if code != 0:
         logger.error(f'Error setting USB port power {action}: {err}')
         return False

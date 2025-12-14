@@ -14,7 +14,10 @@ CAMERA_MOUNT_POINT = '/mnt/cam/'
 CAMERA_DEVICE_PATH = '/dev/disk/by-id/usb-NOVATEKN_vt-DSC_96680-00000-001-0:0'
 
 REMAINING_LOCAL_SPACE = 1024 * 1024 * 1024  # 1GB
-SYS_PATH_ENABLE_USB = '/sys/bus/usb/devices/1-1/authorized'
+SYS_PATH_ENABLE_USB = '/sys/bus/usb/devices/1-1/1-1.1/authorized'
+
+CAMERA_PORT = '1'
+USB_WIFI_PORT = '4'
 
 class GlobalTestableCommands:
     REGISTERED_FUNCTIONS = {}
@@ -164,10 +167,10 @@ async def wait_for_camera_usb_connect():
         await asyncio.sleep(retry_interval)
 
 
-async def set_usb_port_power(enabled: bool):
+async def set_usb_port_power(enabled: bool, port: str = CAMERA_PORT):
     logger.info(f'Setting USB port power to {"on" if enabled else "off"}')
     action = 'on' if enabled else 'off'
-    code, out, err = await run_command(f'uhubctl -l 1-1 -p 1 -a {action}')
+    code, out, err = await run_command(f'uhubctl -l 1-1 -p {port} -a {action}')
     if code != 0:
         logger.error(f'Error setting USB port power {action}: {err}')
         return False
@@ -328,7 +331,7 @@ async def get_wifi_interface_info():
     interface_info = {}
     for line in out.splitlines():
         name, interface, uuid, state = line.split(':')
-        if 'wlan' in interface:
+        if 'localonlywifi' in name:
             interface_info[interface] = {
                 'uuid': uuid,
                 'state': state,
@@ -338,6 +341,7 @@ async def get_wifi_interface_info():
     return interface_info
 
 
+@GlobalTestableCommands.testable_function
 async def ensure_wifi():
     while True:
         interfaces = await get_wifi_interface_info()
@@ -352,8 +356,11 @@ async def ensure_wifi():
                     logger.info(f'WiFi interface {interface} connected successfully')
                     return True
                 else:
-                    logger.error(f'Error connecting WiFi interface {interface}: {err}')
-        logger.info('No active WiFi interfaces found; retrying in 10 seconds')
+                    logger.error(f'Error connecting WiFi interface {interface}: {err}, will restart port {USB_WIFI_PORT}')
+                    await set_usb_port_power(False, port=USB_WIFI_PORT)
+                    await asyncio.sleep(2)
+                    await set_usb_port_power(True, port=USB_WIFI_PORT)
+        logger.info('Will check WiFi status again in 10 seconds')
         await asyncio.sleep(10)
 
     return True
